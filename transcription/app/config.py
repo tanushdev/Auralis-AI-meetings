@@ -46,7 +46,10 @@ class Settings:
     provisional_interval: float = field(
         default_factory=lambda: _float("WHISPER_PROVISIONAL_INTERVAL", 0.75)
     )
-    beam_size: int = field(default_factory=lambda: _int("WHISPER_BEAM_SIZE", 2))
+    # GPU inference can afford a wider beam for accuracy; CPU is clamped at
+    # runtime so slower machines stay close to real time.
+    beam_size: int = field(default_factory=lambda: _int("WHISPER_BEAM_SIZE", 5))
+    hotwords: str = field(default_factory=lambda: os.getenv("WHISPER_HOTWORDS", ""))
     model_dir: str = field(default_factory=lambda: os.getenv("WHISPER_MODEL_DIR", ""))
     concurrency: int = field(default_factory=lambda: _int("WHISPER_CONCURRENCY", 2))
     preload: bool = field(

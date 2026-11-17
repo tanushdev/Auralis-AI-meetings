@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowDown,
   Check,
   Copy,
   Download,
@@ -51,6 +52,8 @@ export function TranscriptPanel({
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [autoFollow, setAutoFollow] = useState(true);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const activeSpeakers = useMemo(
     () =>
@@ -73,6 +76,28 @@ export function TranscriptPanel({
         segment.speakerName.toLowerCase().includes(needle),
     );
   }, [query, segments]);
+
+  // Follow new captions only while the reader is already near the bottom, so
+  // scrolling back through earlier speech is never interrupted.
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node || !autoFollow || query.trim()) return;
+    node.scrollTop = node.scrollHeight;
+  }, [segments, autoFollow, query]);
+
+  const handleScroll = () => {
+    const node = scrollRef.current;
+    if (!node) return;
+    const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+    setAutoFollow(distanceFromBottom < 48);
+  };
+
+  const jumpToLatest = () => {
+    const node = scrollRef.current;
+    if (!node) return;
+    setAutoFollow(true);
+    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+  };
 
   const copy = async () => {
     try {
@@ -172,7 +197,12 @@ export function TranscriptPanel({
         {error ? <p className="text-[11px] text-rose-300">{error}</p> : null}
       </div>
 
-      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="h-full space-y-0.5 overflow-y-auto p-2"
+        >
         {filtered.length === 0 ? (
           <div className="flex h-full items-center justify-center px-4">
             <EmptyState

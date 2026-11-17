@@ -882,6 +882,7 @@ export function MeetingExperience({
     ) : activePanel === "summary" ? (
       <SummaryPanel
         summary={summary}
+        meetingTitle={meeting?.title ?? room.title}
         uiState={summaryState}
         isHost={isHost}
         canGenerate={segments.some((segment) => segment.status !== "provisional") && !summaryBusy}

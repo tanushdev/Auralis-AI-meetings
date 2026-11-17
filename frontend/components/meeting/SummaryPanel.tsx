@@ -1,20 +1,79 @@
 "use client";
 
+import { useState } from "react";
 import {
   AlertTriangle,
+  CalendarClock,
+  Check,
   CheckCircle2,
   Clock,
+  Copy,
+  Download,
   Gavel,
   HelpCircle,
   ListChecks,
   RefreshCw,
   Sparkles,
   Target,
+  UserRound,
 } from "lucide-react";
 import { Badge, Button, EmptyState, Spinner } from "@/components/ui";
 import { cn, formatClock, formatDate } from "@/lib/format";
 import type { Summary } from "@/types";
 import type { SummaryUiState } from "@/store/meetingStore";
+
+function summaryMarkdown(title: string, summary: Summary): string {
+  const lines: string[] = [];
+  lines.push(`# ${title || "Meeting summary"}`, "");
+  const meta = [
+    summary.status === "final" ? "Final summary" : "Draft summary",
+    summary.generatedAt ? formatDate(summary.generatedAt) : null,
+    `${summary.basedOnSegmentCount} transcript segment${summary.basedOnSegmentCount === 1 ? "" : "s"}`,
+    summary.model,
+  ].filter(Boolean);
+  lines.push(`_${meta.join(" · ")}_`);
+  if (summary.incompleteTranscript) {
+    lines.push("", "> Based on an incomplete transcript.");
+  }
+  if (summary.executiveSummary) {
+    lines.push("", "## Executive summary", "", summary.executiveSummary);
+  }
+  if (summary.keyPoints.length > 0) {
+    lines.push("", "## Key points", "", ...summary.keyPoints.map((item) => `- ${item}`));
+  }
+  if (summary.decisions.length > 0) {
+    lines.push("", "## Decisions", "", ...summary.decisions.map((item) => `- ${item}`));
+  }
+  if (summary.actionItems.length > 0) {
+    lines.push("", "## Action items", "");
+    for (const item of summary.actionItems) {
+      const details = [
+        item.assignee ? `Assignee: ${item.assignee}` : "Unassigned",
+        item.deadline ? `Deadline: ${item.deadline}` : "No deadline",
+      ];
+      lines.push(`- **${item.task}** — ${details.join(" · ")}`);
+    }
+  }
+  if (summary.importantMoments.length > 0) {
+    lines.push("", "## Important moments", "");
+    for (const moment of summary.importantMoments) {
+      lines.push(`- \`${formatClock(moment.time)}\` ${moment.description}`);
+    }
+  }
+  if (summary.openQuestions.length > 0) {
+    lines.push("", "## Open questions", "", ...summary.openQuestions.map((item) => `- ${item}`));
+  }
+  lines.push("", "---", "", "_Generated locally. No meeting data was sent to a third-party AI service._");
+  return `${lines.join("\n")}\n`;
+}
+
+function summaryFileName(title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${slug || "meeting"}-summary.md`;
+}
 
 function Section({
   icon,
@@ -57,6 +116,7 @@ function Bullets({ items, empty }: { items: string[]; empty: string }) {
 
 export function SummaryPanel({
   summary,
+  meetingTitle = "",
   uiState,
   isHost,
   canGenerate,
@@ -65,6 +125,7 @@ export function SummaryPanel({
   onSeek,
 }: {
   summary: Summary | null;
+  meetingTitle?: string;
   uiState: SummaryUiState;
   isHost: boolean;
   canGenerate: boolean;
@@ -72,8 +133,37 @@ export function SummaryPanel({
   onRetry: () => void;
   onSeek?: (seconds: number) => void;
 }) {
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const processing = uiState.state === "processing";
   const error = uiState.state === "error" ? uiState.message : summary?.status === "failed" ? summary.error : null;
+
+  const copyMarkdown = async () => {
+    if (!summary) return;
+    try {
+      await navigator.clipboard.writeText(summaryMarkdown(meetingTitle, summary));
+      setCopyError(null);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopyError("Clipboard access was blocked by the browser.");
+    }
+  };
+
+  const downloadMarkdown = () => {
+    if (!summary) return;
+    const blob = new Blob([summaryMarkdown(meetingTitle, summary)], {
+      type: "text/markdown;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = summaryFileName(meetingTitle);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
 
   if (!summary && !processing) {
     return (
@@ -130,6 +220,24 @@ export function SummaryPanel({
           ) : null}
         </div>
         <div className="flex items-center gap-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => void copyMarkdown()}
+            disabled={!summary}
+            title="Copy summary as Markdown"
+          >
+            {copied ? <Check className="size-3.5 text-emerald-300" /> : <Copy className="size-3.5" />}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={downloadMarkdown}
+            disabled={!summary}
+            title="Download summary as Markdown"
+          >
+            <Download className="size-3.5" />
+          </Button>
           {isHost ? (
             <Button
               size="sm"
@@ -172,10 +280,13 @@ export function SummaryPanel({
 
         {summary?.incompleteTranscript ? (
           <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 p-2.5 text-[11px] text-amber-200">
-            This summary is based on an incomplete transcript (the meeting is still in progress or
-            transcription did not finish).
+            {summary.status === "draft"
+              ? "Live draft: it covers the transcript finalized so far and updates as the meeting continues."
+              : "This summary is based on an incomplete transcript (transcription did not finish)."}
           </div>
         ) : null}
+
+        {copyError ? <p className="text-[11px] text-rose-300">{copyError}</p> : null}
 
         {summary ? (
           <>
@@ -209,9 +320,29 @@ export function SummaryPanel({
                         <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-emerald-300" />
                         {item.task}
                       </p>
-                      <div className="mt-1.5 flex flex-wrap gap-3 pl-5 text-[11px] text-muted">
-                        <span>Assignee: {item.assignee ?? "not specified"}</span>
-                        <span>Deadline: {item.deadline ?? "not specified"}</span>
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-5 text-[10px]">
+                        <span
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded-full px-2 py-0.5",
+                            item.assignee
+                              ? "bg-white/[0.06] text-ink/80"
+                              : "bg-white/[0.03] text-muted",
+                          )}
+                        >
+                          <UserRound className="size-2.5" />
+                          {item.assignee ?? "Unassigned"}
+                        </span>
+                        <span
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded-full px-2 py-0.5",
+                            item.deadline
+                              ? "bg-white/[0.06] text-ink/80"
+                              : "bg-white/[0.03] text-muted",
+                          )}
+                        >
+                          <CalendarClock className="size-2.5" />
+                          {item.deadline ?? "No deadline"}
+                        </span>
                       </div>
                     </li>
                   ))}
@@ -253,10 +384,29 @@ export function SummaryPanel({
               <Bullets items={summary.openQuestions} empty="No open questions were recorded." />
             </Section>
 
-            <div className="border-t border-line pt-3 text-[11px] text-muted">
-              Generated locally from {summary.basedOnSegmentCount} transcript segment
-              {summary.basedOnSegmentCount === 1 ? "" : "s"}
-              {summary.generatedAt ? ` · ${formatDate(summary.generatedAt)}` : ""}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-line pt-3 text-[11px] text-muted">
+              <span className="inline-flex items-center gap-1.5 text-ink/70">
+                <span
+                  className={cn(
+                    "size-1.5 rounded-full",
+                    summary.status === "final" ? "bg-emerald-400" : "bg-amber-400",
+                  )}
+                />
+                {summary.status === "final" ? "Final summary" : "Live draft"}
+              </span>
+              <span aria-hidden>·</span>
+              <span>
+                {summary.basedOnSegmentCount} transcript segment
+                {summary.basedOnSegmentCount === 1 ? "" : "s"}
+              </span>
+              <span aria-hidden>·</span>
+              <span className="truncate">{summary.model}</span>
+              {summary.generatedAt ? (
+                <>
+                  <span aria-hidden>·</span>
+                  <span>{formatDate(summary.generatedAt)}</span>
+                </>
+              ) : null}
             </div>
           </>
         ) : null}

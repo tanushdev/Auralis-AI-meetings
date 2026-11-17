@@ -49,6 +49,7 @@ class ModelManager:
             "chunkSeconds": settings.chunk_seconds,
             "strideSeconds": settings.stride_seconds,
             "provisionalInterval": settings.provisional_interval,
+            "beamSize": settings.beam_size,
         }
 
     # -- loading --------------------------------------------------------
@@ -106,7 +107,7 @@ class ModelManager:
             log.error("Preload failed: %s", exc)
 
     # -- inference ------------------------------------------------------
-    def transcribe(self, audio, language: str | None):
+    def transcribe(self, audio, language: str | None, prompt: str | None = None):
         """Transcribe a float32 numpy array. Retries once on CPU after CUDA errors."""
         self.ensure_loaded()
         if self._model is None:
@@ -115,7 +116,7 @@ class ModelManager:
         model = self._model
         with self._infer:
             try:
-                return self._run(model, audio, language)
+                return self._run(model, audio, language, prompt)
             except Exception as exc:  # noqa: BLE001
                 message = str(exc).lower()
                 cuda_problem = self._device == "cuda" or "cuda" in message or "out of memory" in message
@@ -128,19 +129,27 @@ class ModelManager:
                     self._compute_type = "int8"
                     self._load_locked()
                     model = self._model
-                return self._run(model, audio, language)
+                return self._run(model, audio, language, prompt)
 
-    def _run(self, model, audio, language: str | None):
+    def _run(self, model, audio, language: str | None, prompt: str | None):
+        # Wide beam search materially improves punctuation and names on a GPU,
+        # while CPU inference keeps a small beam to stay usable.
+        beam = max(1, settings.beam_size) if self._device == "cuda" else min(2, max(1, settings.beam_size))
         segments, info = model.transcribe(
             audio,
             language=language,
-            beam_size=max(1, settings.beam_size),
-            best_of=max(1, settings.beam_size),
+            beam_size=beam,
+            best_of=beam,
             temperature=0.0,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 400},
+            vad_parameters={
+                "min_silence_duration_ms": 300,
+                "speech_pad_ms": 200,
+            },
             word_timestamps=True,
             condition_on_previous_text=False,
+            initial_prompt=prompt or None,
+            hotwords=settings.hotwords.strip() or None,
         )
         words = []
         full_text: list[str] = []

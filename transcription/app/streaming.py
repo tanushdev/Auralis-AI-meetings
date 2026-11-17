@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from typing import Awaitable, Callable
 
@@ -46,10 +47,19 @@ class StreamSession:
         self.last_commit_at = 0.0
         self.last_provisional_at = -1e9
         self.provisional_id: str | None = None
-        # Pin the language after the first confident detection. Otherwise
-        # faster-whisper re-runs language identification on every window,
-        # adding latency and occasionally flipping languages mid-sentence.
+        # Pin the language after two consistent high-confidence detections.
+        # A lower threshold used to pin on noisy one-off guesses (for example
+        # English speech briefly classified as Hindi) and hurt every later
+        # window. User-configured languages are never auto-switched.
+        self.language_locked = settings.language_arg is not None
+        self.language_candidate: str | None = None
+        self.language_votes = 0
+        self.language_switch_votes = 0
         self.language = settings.language_arg
+        # Recent finalized words give Whisper vocabulary and punctuation
+        # context without letting it re-write already committed text.
+        self.recent_text = ""
+        self.last_committed_words: list[dict] = []
 
         self.trigger = asyncio.Event()
         self.stopped = False
@@ -139,18 +149,14 @@ class StreamSession:
         if audio.size < int(0.5 * self.sample_rate):
             return None
         try:
-            result = await asyncio.to_thread(manager.transcribe, audio, self.language)
+            result = await asyncio.to_thread(
+                manager.transcribe, audio, self.language, self._prompt()
+            )
         except Exception as exc:  # noqa: BLE001
             log.exception("Transcription failed for %s", self.session_tag)
             await self._send({"type": "error", "message": f"Transcription failed: {exc}"})
             return None
-        if (
-            self.language is None
-            and result.get("language")
-            and float(result.get("languageProbability") or 0.0) >= 0.75
-            and self.now >= 1.5
-        ):
-            self.language = result["language"]
+        self._track_language(result)
         return result, window_start, window_end
 
     async def _commit(self, force: bool = False, is_final_flush: bool = False) -> None:
@@ -163,7 +169,11 @@ class StreamSession:
         result, window_start, window_end = outcome
         words = self._absolute_words(result.get("words") or [], window_start)
         cutoff = self.committed_until
-        kept = [word for word in words if word["start"] >= cutoff - 0.05]
+        # Keep words that cross the commit boundary, then remove any leading
+        # words already emitted. The old hard cutoff could clip the first word
+        # of a new sentence when it began just before the boundary.
+        kept = [word for word in words if word["end"] > cutoff - 0.15]
+        kept = self._drop_committed_overlap(kept)
         self.committed_until = window_end
 
         if not kept:
@@ -172,19 +182,26 @@ class StreamSession:
         groups = self._group_words(kept)
         replace_id = self.provisional_id
         self.provisional_id = None
-        for index, group in enumerate(groups):
+        replaced = False
+        for group in groups:
+            text = self._clean_text(" ".join(word["word"] for word in group))
+            if not text:
+                continue
             self.counter += 1
             segment = {
                 "type": "segment",
                 "status": "final",
                 "segmentId": f"f-{self.session_tag}-{self.counter}",
-                "text": self._clean_text(" ".join(word["word"] for word in group)),
+                "text": text,
                 "startSec": round(group[0]["start"], 3),
                 "endSec": round(group[-1]["end"], 3),
                 "language": result.get("language"),
-                "replaceId": replace_id if index == 0 else None,
+                "replaceId": replace_id if not replaced else None,
                 "flush": is_final_flush,
             }
+            replaced = True
+            self._remember(text)
+            self.last_committed_words = (self.last_committed_words + group)[-12:]
             await self._send(segment)
 
     async def _provisional(self) -> None:
@@ -194,7 +211,8 @@ class StreamSession:
             return
         result, window_start, _ = outcome
         words = self._absolute_words(result.get("words") or [], window_start)
-        kept = [word for word in words if word["start"] >= self.committed_until - 0.05]
+        kept = [word for word in words if word["end"] > self.committed_until - 0.15]
+        kept = self._drop_committed_overlap(kept)
         if not kept:
             return
         previous = self.provisional_id
@@ -224,14 +242,20 @@ class StreamSession:
         out.sort(key=lambda item: item["start"])
         return out
 
-    def _group_words(self, words: list[dict], gap: float = 1.2, max_span: float = 15.0) -> list[list[dict]]:
+    def _group_words(self, words: list[dict], gap: float = 1.2, max_span: float = 12.0) -> list[list[dict]]:
         groups: list[list[dict]] = []
         current: list[dict] = []
         for word in words:
             if not current:
                 current = [word]
                 continue
-            if word["start"] - current[-1]["end"] > gap or word["end"] - current[0]["start"] > max_span:
+            span = word["end"] - current[0]["start"]
+            sentence_end = current[-1]["word"].rstrip().endswith((".", "?", "!"))
+            if (
+                word["start"] - current[-1]["end"] > gap
+                or span > max_span
+                or (sentence_end and len(current) >= 4)
+            ):
                 groups.append(current)
                 current = [word]
             else:
@@ -241,8 +265,70 @@ class StreamSession:
         return groups
 
     @staticmethod
+    def _normalise_word(value: str) -> str:
+        return re.sub(r"[^\w']+", "", value).lower()
+
+    def _drop_committed_overlap(self, words: list[dict]) -> list[dict]:
+        """Remove leading words the previous commit already emitted."""
+        tail = self.last_committed_words[-8:]
+        limit = min(len(tail), len(words), 8)
+        for size in range(limit, 0, -1):
+            if all(
+                self._normalise_word(tail[-size + index]["word"])
+                == self._normalise_word(words[index]["word"])
+                for index in range(size)
+            ):
+                return words[size:]
+        return words
+
+    def _remember(self, text: str) -> None:
+        self.recent_text = f"{self.recent_text} {text}".strip()
+        if len(self.recent_text) > 220:
+            self.recent_text = self.recent_text[-220:].split(" ", 1)[-1]
+
+    def _prompt(self) -> str | None:
+        text = self.recent_text.strip()
+        return text or None
+
+    def _track_language(self, result: dict) -> None:
+        if self.language_locked:
+            return
+        detected = result.get("language")
+        if not detected:
+            return
+        probability = float(result.get("languageProbability") or 0.0)
+        if self.language is None:
+            if probability < 0.9:
+                return
+            if detected == self.language_candidate:
+                self.language_votes += 1
+            else:
+                self.language_candidate = detected
+                self.language_votes = 1
+            if self.language_votes >= 2:
+                self.language = detected
+                log.info("Pinned language '%s' for %s", detected, self.session_tag)
+            return
+        # Allow a real language change only after sustained, very confident
+        # evidence instead of a single noisy window.
+        if detected != self.language and probability >= 0.97:
+            self.language_switch_votes += 1
+            if self.language_switch_votes >= 3:
+                log.info(
+                    "Switching language '%s' -> '%s' for %s",
+                    self.language,
+                    detected,
+                    self.session_tag,
+                )
+                self.language = detected
+                self.language_switch_votes = 0
+        else:
+            self.language_switch_votes = 0
+
+    @staticmethod
     def _clean_text(text: str) -> str:
         cleaned = " ".join(text.split())
+        cleaned = re.sub(r"\s+([,.!?;:])", r"\1", cleaned)
         if cleaned and cleaned[0].isalpha():
             cleaned = cleaned[0].upper() + cleaned[1:]
         return cleaned
