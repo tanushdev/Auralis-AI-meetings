@@ -34,10 +34,39 @@ if (!python) {
 }
 
 const port = process.env.TRANSCRIPTION_PORT || "8000";
+const childEnv = { ...process.env };
+
+// CUDA builds of CTranslate2 need cuBLAS/cuDNN on the loader path. The GPU
+// requirements install them as wheels inside the venv, so add those folders
+// explicitly instead of asking Windows users to edit system PATH.
+const venvDir = path.join(serviceDir, ".venv");
+const nvidiaCandidates = [path.join(venvDir, "Lib", "site-packages", "nvidia")];
+for (const libDir of ["lib", "lib64"]) {
+  const pythonLibs = path.join(venvDir, libDir);
+  if (!fs.existsSync(pythonLibs)) continue;
+  for (const entry of fs.readdirSync(pythonLibs)) {
+    if (entry.startsWith("python")) {
+      nvidiaCandidates.push(path.join(pythonLibs, entry, "site-packages", "nvidia"));
+    }
+  }
+}
+const nvidiaRoot = nvidiaCandidates.find((candidate) => fs.existsSync(candidate));if (fs.existsSync(nvidiaRoot)) {
+  const dllDirs = fs
+    .readdirSync(nvidiaRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(nvidiaRoot, entry.name, "bin"))
+    .filter((dir) => fs.existsSync(dir));
+  if (dllDirs.length > 0) {
+    const key = process.platform === "win32" ? "Path" : "LD_LIBRARY_PATH";
+    const existing = childEnv[key] ?? "";
+    childEnv[key] = [...dllDirs, existing].filter(Boolean).join(path.delimiter);
+  }
+}
+
 const child = spawn(
   python,
   ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", port],
-  { cwd: serviceDir, stdio: "inherit", env: process.env },
+  { cwd: serviceDir, stdio: "inherit", env: childEnv },
 );
 
 child.on("exit", (code) => process.exit(code ?? 0));

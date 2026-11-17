@@ -18,6 +18,7 @@ class ModelManager:
         self._lock = threading.Lock()
         self._model: Any = None
         self._device, self._compute_type = settings.resolved_device()
+        self._model_name = settings.model if self._device != "cpu" else settings.cpu_model
         self._state = "idle"  # idle | loading | ready | error
         self._error: str | None = None
         self._infer = threading.Semaphore(max(1, settings.concurrency))
@@ -38,7 +39,8 @@ class ModelManager:
     def status(self) -> dict[str, Any]:
         return {
             "provider": settings.provider,
-            "model": settings.model,
+            "model": self._model_name,
+            "configuredModel": settings.model,
             "device": self._device,
             "computeType": self._compute_type,
             "modelLoaded": self._model is not None,
@@ -55,24 +57,29 @@ class ModelManager:
 
         self._state = "loading"
         self._error = None
-        attempts = [
-            (self._device, self._compute_type),
-            ("cpu", "int8"),
-        ]
+        attempts: list[tuple[str, str, str]] = []
+        # The large multilingual model is only worth loading on a GPU. On CPU
+        # it would lag behind real time, so use the smaller fallback there.
+        if self._device == "cuda":
+            attempts.append((self._device, self._compute_type, settings.model))
+        attempts.append(("cpu", "int8", settings.cpu_model))
+
         last_error: Exception | None = None
-        for device, compute_type in attempts:
+        for device, compute_type, model_name in attempts:
             try:
-                log.info("Loading Whisper model '%s' on %s (%s)", settings.model, device, compute_type)
-                self._model = WhisperModel(
-                    settings.model,
+                log.info("Loading Whisper model '%s' on %s (%s)", model_name, device, compute_type)
+                model = WhisperModel(
+                    model_name,
                     device=device,
                     compute_type=compute_type,
                     download_root=settings.model_dir or None,
                     num_workers=1,
                     cpu_threads=0,
                 )
+                self._model = model
                 self._device = device
                 self._compute_type = compute_type
+                self._model_name = model_name
                 self._state = "ready"
                 log.info("Whisper model ready on %s (%s)", device, compute_type)
                 return
@@ -127,8 +134,8 @@ class ModelManager:
         segments, info = model.transcribe(
             audio,
             language=language,
-            beam_size=1,
-            best_of=1,
+            beam_size=max(1, settings.beam_size),
+            best_of=max(1, settings.beam_size),
             temperature=0.0,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 400},

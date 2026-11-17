@@ -2,6 +2,10 @@ import path from "node:path";
 import { defineConfig } from "@playwright/test";
 
 const fixtureAudio = path.resolve(import.meta.dirname, "fixtures/speech-48k.wav");
+const baseURL = process.env.E2E_BASE_URL || "http://localhost:3000";
+const skipTunnelWarning = baseURL.includes("ngrok")
+  ? { "ngrok-skip-browser-warning": "true" }
+  : undefined;
 
 export default defineConfig({
   testDir: ".",
@@ -13,7 +17,8 @@ export default defineConfig({
   reporter: [["list"]],
   use: {
     actionTimeout: 30_000,
-    baseURL: "http://localhost:3000",
+    baseURL,
+    extraHTTPHeaders: skipTunnelWarning,
     headless: true,
     viewport: { width: 1440, height: 900 },
     permissions: ["camera", "microphone"],

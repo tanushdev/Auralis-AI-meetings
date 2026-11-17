@@ -70,6 +70,7 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState<SettingsResponse["config"] | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+  const [endpoints, setEndpoints] = useState<{ api: string; ws: string } | null>(null);
 
   const loadHealth = useCallback(async () => {
     setHealthLoading(true);
@@ -99,6 +100,15 @@ export default function SettingsPage() {
     void loadHealth();
     void loadSettings();
   }, [loadHealth, loadSettings]);
+
+  // Resolved after mount: in same-origin (gateway/tunnel) mode API_URL is an
+  // empty string, and the public origin is only known in the browser.
+  useEffect(() => {
+    setEndpoints({
+      api: API_URL || window.location.origin,
+      ws: WS_URL || window.location.origin,
+    });
+  }, []);
 
   const signOut = async () => {
     setSigningOut(true);
@@ -248,11 +258,11 @@ export default function SettingsPage() {
           <div className="mt-3 space-y-3">
             <div>
               <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Backend API</p>
-              <CopyValue value={API_URL} />
+              <CopyValue value={endpoints?.api ?? "Resolving…"} />
             </div>
             <div>
               <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">Signaling WebSocket</p>
-              <CopyValue value={`${WS_URL}/ws`} />
+              <CopyValue value={`${endpoints?.ws ?? "Resolving…"}/ws`} />
             </div>
             <div>
               <p className="mb-1 text-[10px] uppercase tracking-wide text-muted">

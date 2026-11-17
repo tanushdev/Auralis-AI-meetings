@@ -79,6 +79,33 @@ it has been implemented **and verified** against the running local stack.
 - [x] End-to-end test pass against §17 Definition of Done
 - [x] Documented limitations (no TURN, mesh scale, latency, VRAM/CPU)
 
+## M8 — Remote guest access and transcription quality
+
+- [x] Same-origin gateway (`/api`, `/ws` → backend; everything else → Next.js)
+- [x] One-command HTTPS tunnel for a second laptop with no project code
+- [x] Empty public API/WS URLs resolve automatically for localhost vs tunnel origins
+- [x] Camera/microphone selection before joining and mid-call, including system default
+- [x] Microphone switch restarts live transcription on the new track
+- [x] Multilingual `large-v3-turbo` on CUDA with `small` CPU fallback
+- [x] cuBLAS/cuDNN runtime wheels + loader-path setup for real GPU inference
+- [x] 4 s / 1.5 s streaming window, language pinning, beam size 2
+- [x] `qwen2.5:3b` summaries sized for a 6 GB GPU shared with Whisper
+- [x] Verification: tunnel smoke test, device switching, live transcription, final summary
+
+## Verification record — 2026-11-18
+
+| Check | Result |
+| --- | --- |
+| `npm run typecheck` (backend + frontend) | Passed |
+| `node scripts/verify-local.mjs` via gateway :4000 | All checks passed: signaling, presence, media/recording state, chat, streaming transcript, provisional updates, recording metadata, history, real final `qwen2.5:3b` summary |
+| `npx playwright test -c e2e/playwright.config.mjs e2e/meeting.spec.mjs` | 1 passed (2.2 min): full three-participant local meeting |
+| `E2E_BASE_URL=https://<tunnel> … e2e/remote-smoke.spec.mjs` | 1 passed (13.5 s): secure-context capture, two peers over the public tunnel, chat, live transcript, mid-call camera/mic switching |
+| Transcription runtime | `/health`: `large-v3-turbo`, `cuda`, `int8_float16`, 4 s / 1.5 s window, model loaded (1.25 GB VRAM) |
+
+The tunnel run confirmed the latency fix: captions arrived within about a second of polling, and the
+verifier transcript read: "Today we reviewed the project timeline. Will finish the design review. By
+Friday. Decided to launch the Baitan next month."
+
 ## Verification record — 2026-10-30
 
 | Check | Result |

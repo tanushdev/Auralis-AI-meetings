@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import {
   Captions,
   Circle,
@@ -11,12 +12,16 @@ import {
   Pause,
   PhoneOff,
   Play,
+  Settings2,
   Sparkles,
   Square,
   Users,
   Video,
   VideoOff,
+  X,
 } from "lucide-react";
+import { Label, Select } from "@/components/ui";
+import type { DeviceLists } from "@/hooks/useMediaDevices";
 import { cn, formatClock } from "@/lib/format";
 
 export type SidePanel = "chat" | "people" | "transcript" | "summary" | null;
@@ -31,6 +36,10 @@ interface Props {
   activePanel: SidePanel;
   unreadChat: number;
   connectionState: "idle" | "connecting" | "connected" | "reconnecting" | "disconnected";
+  devices: DeviceLists;
+  selectedCamera: string | null;
+  selectedMicrophone: string | null;
+  onSwitchDevice: (kind: "audio" | "video", deviceId: string) => void;
   onToggleAudio: () => void;
   onToggleVideo: () => void;
   onToggleScreen: () => void;
@@ -92,6 +101,10 @@ export function ControlBar({
   activePanel,
   unreadChat,
   connectionState,
+  devices,
+  selectedCamera,
+  selectedMicrophone,
+  onSwitchDevice,
   onToggleAudio,
   onToggleVideo,
   onToggleScreen,
@@ -100,6 +113,7 @@ export function ControlBar({
   onTogglePanel,
   onLeave,
 }: Props) {
+  const [devicesOpen, setDevicesOpen] = useState(false);
   return (
     <div className="relative z-20 flex flex-wrap items-center justify-center gap-2 border-t border-line bg-panel/90 px-3 py-2.5 backdrop-blur-xl sm:gap-3">
       <div className="flex items-center gap-2">
@@ -115,6 +129,13 @@ export function ControlBar({
           onClick={onToggleScreen}
         >
           {screenSharing ? <MonitorOff className="size-4.5" /> : <MonitorUp className="size-4.5" />}
+        </ControlButton>
+        <ControlButton
+          label="Camera & microphone"
+          active={devicesOpen}
+          onClick={() => setDevicesOpen((value) => !value)}
+        >
+          <Settings2 className="size-4.5" />
         </ControlButton>
       </div>
 
@@ -189,6 +210,59 @@ export function ControlBar({
         <PhoneOff className="size-4" />
         <span className="hidden sm:inline">Leave</span>
       </button>
+
+      {devicesOpen ? (
+        <div className="absolute bottom-full left-1/2 z-30 mb-3 w-[min(90vw,380px)] -translate-x-1/2 rounded-2xl border border-line bg-panel p-3 shadow-2xl">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <p className="text-xs font-semibold">Camera &amp; microphone</p>
+            <button
+              onClick={() => setDevicesOpen(false)}
+              aria-label="Close device settings"
+              className="flex size-7 items-center justify-center rounded-full border border-line text-muted hover:text-ink"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+          <div className="space-y-2">
+            <div>
+              <Label htmlFor="meeting-camera-select">Camera</Label>
+              <Select
+                id="meeting-camera-select"
+                value={selectedCamera ?? ""}
+                onChange={(event) => onSwitchDevice("video", event.target.value)}
+                disabled={devices.cameras.length === 0}
+              >
+                <option value="">System default</option>
+                {devices.cameras.map((device, index) => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                    {device.label || `Camera ${index + 1}`}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <Label htmlFor="meeting-mic-select">Microphone</Label>
+              <Select
+                id="meeting-mic-select"
+                value={selectedMicrophone ?? ""}
+                onChange={(event) => onSwitchDevice("audio", event.target.value)}
+                disabled={devices.microphones.length === 0}
+              >
+                <option value="">System default</option>
+                {devices.microphones.map((device, index) => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                    {device.label || `Microphone ${index + 1}`}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          </div>
+          <p className="mt-2 text-[10px] leading-relaxed text-muted">
+            Switching applies immediately for everyone in the meeting. If you change the microphone
+            during a call, live transcription restarts on the new device.
+          </p>
+        </div>
+      ) : null}
 
       {connectionState === "reconnecting" ? (
         <span className="absolute -top-8 left-1/2 -translate-x-1/2 rounded-full border border-amber-500/30 bg-amber-500/15 px-3 py-1 text-[11px] text-amber-200">

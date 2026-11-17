@@ -46,6 +46,10 @@ class StreamSession:
         self.last_commit_at = 0.0
         self.last_provisional_at = -1e9
         self.provisional_id: str | None = None
+        # Pin the language after the first confident detection. Otherwise
+        # faster-whisper re-runs language identification on every window,
+        # adding latency and occasionally flipping languages mid-sentence.
+        self.language = settings.language_arg
 
         self.trigger = asyncio.Event()
         self.stopped = False
@@ -135,11 +139,18 @@ class StreamSession:
         if audio.size < int(0.5 * self.sample_rate):
             return None
         try:
-            result = await asyncio.to_thread(manager.transcribe, audio, settings.language_arg)
+            result = await asyncio.to_thread(manager.transcribe, audio, self.language)
         except Exception as exc:  # noqa: BLE001
             log.exception("Transcription failed for %s", self.session_tag)
             await self._send({"type": "error", "message": f"Transcription failed: {exc}"})
             return None
+        if (
+            self.language is None
+            and result.get("language")
+            and float(result.get("languageProbability") or 0.0) >= 0.75
+            and self.now >= 1.5
+        ):
+            self.language = result["language"]
         return result, window_start, window_end
 
     async def _commit(self, force: bool = False, is_final_flush: bool = False) -> None:

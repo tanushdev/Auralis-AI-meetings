@@ -153,6 +153,7 @@ export function MeetingExperience({
   const mediaRef = useRef<ReturnType<typeof useMediaDevices> | null>(null);
   const audioRef = useRef<ReturnType<typeof useAudioCapture> | null>(null);
   const recorderRef = useRef<ReturnType<typeof useRecorder> | null>(null);
+  const localAudioTrackIdRef = useRef<string | null>(null);
   const historyTokenRef = useRef(0);
 
   const isHost = Boolean(user && meeting?.hostId === user.id);
@@ -430,7 +431,17 @@ export function MeetingExperience({
   const media = useMediaDevices({
     onStreamChange: (stream) => {
       webRTCRef.current?.setLocalStream(stream);
-      if (joinedRef.current) publishMedia();
+      const nextAudioTrack = stream?.getAudioTracks()[0] ?? null;
+      const previousAudioTrackId = localAudioTrackIdRef.current;
+      localAudioTrackIdRef.current = nextAudioTrack?.id ?? null;
+      if (!joinedRef.current) return;
+      publishMedia();
+      // A different microphone means the AudioWorklet source is stale. Restart
+      // capture on the new track so live transcription keeps working.
+      if (nextAudioTrack?.id !== previousAudioTrackId) {
+        audioRef.current?.stop(false);
+        if (nextAudioTrack?.enabled) startTranscription(stream);
+      }
     },
     onScreenEnd: () => {
       webRTCRef.current?.setScreenTrack(null);
@@ -1108,6 +1119,10 @@ export function MeetingExperience({
             activePanel={activePanel}
             unreadChat={unreadChat}
             connectionState={connection}
+            devices={media.devices}
+            selectedCamera={media.selectedCamera}
+            selectedMicrophone={media.selectedMicrophone}
+            onSwitchDevice={(kind, deviceId) => void media.switchDevice(kind, deviceId)}
             onToggleAudio={() => void toggleAudio()}
             onToggleVideo={() => void toggleVideo()}
             onToggleScreen={() => void toggleScreen()}
@@ -1329,7 +1344,7 @@ function PreJoinScreen({
                 id="camera-select"
                 value={media.selectedCamera ?? ""}
                 onChange={(event) => {
-                  if (event.target.value) void media.switchDevice("video", event.target.value);
+                  void media.switchDevice("video", event.target.value);
                 }}
                 disabled={isJoining || media.devices.cameras.length === 0}
               >
@@ -1347,7 +1362,7 @@ function PreJoinScreen({
                 id="mic-select"
                 value={media.selectedMicrophone ?? ""}
                 onChange={(event) => {
-                  if (event.target.value) void media.switchDevice("audio", event.target.value);
+                  void media.switchDevice("audio", event.target.value);
                 }}
                 disabled={isJoining || media.devices.microphones.length === 0}
               >

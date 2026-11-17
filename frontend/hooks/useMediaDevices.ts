@@ -135,42 +135,71 @@ export function useMediaDevices(options: Options = {}) {
 
   const switchDevice = useCallback(
     async (kind: "audio" | "video", deviceId: string) => {
-      if (kind === "audio") setSelectedMicrophone(deviceId);
-      else setSelectedCamera(deviceId);
-      const constraints: MediaStreamConstraints = {
-        audio:
-          kind === "audio" || audioEnabled
-            ? {
-                ...(kind === "audio" ? { deviceId: { exact: deviceId } } : {}),
+      const current = streamRef.current;
+      const audioOn = current
+        ? current.getAudioTracks().some((track) => track.enabled)
+        : audioEnabled;
+      const videoOn = current
+        ? current.getVideoTracks().some((track) => track.enabled)
+        : videoEnabled;
+
+      // Request only the device being changed. Asking for both again would
+      // silently reset the other selection to the system default.
+      const constraints: MediaStreamConstraints =
+        kind === "audio"
+          ? {
+              audio: {
+                ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
                 echoCancellation: true,
                 noiseSuppression: true,
-              }
-            : false,
-        video:
-          kind === "video" || videoEnabled
-            ? {
-                ...(kind === "video" ? { deviceId: { exact: deviceId } } : {}),
+                autoGainControl: true,
+              },
+              video: false,
+            }
+          : {
+              audio: false,
+              video: {
+                ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
                 width: { ideal: 1280 },
                 height: { ideal: 720 },
-              }
-            : false,
-      };
+                frameRate: { ideal: 30 },
+              },
+            };
+
       try {
-        const next = await navigator.mediaDevices.getUserMedia(constraints);
-        const previous = streamRef.current;
+        const replacement = await navigator.mediaDevices.getUserMedia(constraints);
+        const next = new MediaStream();
+        if (kind !== "audio") {
+          current?.getAudioTracks().forEach((track) => next.addTrack(track));
+        }
+        if (kind !== "video") {
+          current?.getVideoTracks().forEach((track) => next.addTrack(track));
+        }
+        if (kind === "audio") {
+          replacement.getAudioTracks().forEach((track) => {
+            track.enabled = audioOn;
+            next.addTrack(track);
+          });
+        } else {
+          replacement.getVideoTracks().forEach((track) => {
+            track.enabled = videoOn;
+            next.addTrack(track);
+          });
+        }
+
         streamRef.current = next;
-        next.getAudioTracks().forEach((track) => {
-          track.enabled = audioEnabled;
-        });
-        next.getVideoTracks().forEach((track) => {
-          track.enabled = videoEnabled;
-        });
         setStream(next);
-        previous?.getTracks().forEach((track) => track.stop());
+        if (kind === "audio") setSelectedMicrophone(deviceId || null);
+        else setSelectedCamera(deviceId || null);
+        // Stop the replaced hardware only after the new track is live, so a
+        // failure above leaves the previous camera/mic untouched.
+        const replaced = kind === "audio" ? current?.getAudioTracks() : current?.getVideoTracks();
+        replaced?.forEach((track) => track.stop());
         optionsRef.current.onStreamChange?.(next);
         await refreshDevices();
       } catch (err) {
         setError(describeMediaError(err));
+        await refreshDevices();
       }
     },
     [audioEnabled, videoEnabled, refreshDevices],

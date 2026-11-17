@@ -1,0 +1,13 @@
+# Optional CUDA runtime libraries for NVIDIA GPUs.
+#
+# Install after requirements.txt when you want Whisper to run on CUDA instead
+# of falling back to CPU:
+#
+#   .venv\Scripts\pip install -r requirements-gpu.txt      (Windows)
+#   .venv/bin/pip install -r requirements-gpu.txt          (Linux)
+#
+# `scripts/dev-transcription.mjs` adds these wheel-provided DLL/SO folders to
+# the loader path automatically. Without them faster-whisper logs
+# "Library cublas64_12.dll is not found" and uses the CPU model.
+nvidia-cublas-cu12>=12,<13
+nvidia-cudnn-cu12>=9,<10

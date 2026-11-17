@@ -30,15 +30,23 @@ def _int(name: str, default: int) -> int:
 class Settings:
     token: str = field(default_factory=lambda: os.getenv("TRANSCRIPTION_TOKEN", ""))
     provider: str = field(default_factory=lambda: os.getenv("TRANSCRIPTION_PROVIDER", "faster-whisper"))
-    model: str = field(default_factory=lambda: os.getenv("WHISPER_MODEL", "small"))
+    # large-v3-turbo is multilingual and close to large-v3 accuracy while
+    # staying fast enough for live captions on a local GPU.
+    model: str = field(default_factory=lambda: os.getenv("WHISPER_MODEL", "large-v3-turbo"))
+    # CPU inference with a large model is slower than real time, so machines
+    # without CUDA (or with too little VRAM) fall back to this smaller model.
+    cpu_model: str = field(default_factory=lambda: os.getenv("WHISPER_CPU_MODEL", "small"))
     device: str = field(default_factory=lambda: os.getenv("WHISPER_DEVICE", "auto"))
     compute_type: str = field(default_factory=lambda: os.getenv("WHISPER_COMPUTE_TYPE", "auto"))
     language: str = field(default_factory=lambda: os.getenv("WHISPER_LANGUAGE", "auto"))
-    chunk_seconds: float = field(default_factory=lambda: _float("WHISPER_CHUNK_SECONDS", 6.0))
-    stride_seconds: float = field(default_factory=lambda: _float("WHISPER_STRIDE_SECONDS", 4.0))
+    # Live captions: commit every 1.5 s from a 4 s acoustic window. This keeps
+    # caption latency around two seconds without losing sentence context.
+    chunk_seconds: float = field(default_factory=lambda: _float("WHISPER_CHUNK_SECONDS", 4.0))
+    stride_seconds: float = field(default_factory=lambda: _float("WHISPER_STRIDE_SECONDS", 1.5))
     provisional_interval: float = field(
-        default_factory=lambda: _float("WHISPER_PROVISIONAL_INTERVAL", 2.5)
+        default_factory=lambda: _float("WHISPER_PROVISIONAL_INTERVAL", 0.75)
     )
+    beam_size: int = field(default_factory=lambda: _int("WHISPER_BEAM_SIZE", 2))
     model_dir: str = field(default_factory=lambda: os.getenv("WHISPER_MODEL_DIR", ""))
     concurrency: int = field(default_factory=lambda: _int("WHISPER_CONCURRENCY", 2))
     preload: bool = field(

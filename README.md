@@ -8,7 +8,8 @@ browser; only metadata is stored in MongoDB.
 ## Features
 
 - **Real calls** — native `RTCPeerConnection` mesh, shareable room links, camera/microphone
-  toggles, screen sharing, participant presence, and host controls.
+  toggles, screen sharing, participant presence, and host controls. Camera and microphone can be
+  chosen before joining and switched mid-call without dropping other participants.
 - **Live transcription** — browser audio is captured with an AudioWorklet, streamed as 16 kHz PCM16
   to the backend, and transcribed continuously by a local faster-whisper service. Segments carry
   timestamps, speaker attribution, provisional/final states, editing, search, copy, and TXT export.
@@ -25,22 +26,29 @@ browser; only metadata is stored in MongoDB.
   room-scoped signed guest access.
 - **Dark, responsive UI** — built with Next.js App Router, React, TypeScript, Tailwind, and
   Zustand. The meeting interface is at `/meeting/[roomId]`.
+- **Remote access without installing the project** — a same-origin gateway proxies `/api` and `/ws`
+  to the backend and everything else to Next.js, so one HTTPS tunnel URL serves the entire app.
+  A friend only needs that URL and a browser.
 
 ## Architecture
 
 ```text
-Browser (Next.js :3000)
+Browser (Next.js :3000, or HTTPS tunnel)
   ├─ REST  ─────────────────────────────► Express backend :5000 ──► MongoDB :27017
   ├─ WS /ws (signaling + PCM audio) ────► Express backend :5000
   │                                           ├─ WS /ws/transcribe ─► faster-whisper :8000
   │                                           └─ HTTP /api/chat ────► Ollama :11434
   └─ MediaRecorder + IndexedDB (recordings stay here)
+
+Remote browser ──HTTPS──► gateway :4000 ──┬─ /api, /ws ─► backend :5000
+                                          └─ everything else ─► Next.js :3000
 ```
 
 - **Frontend** — Next.js 16, React 19, TypeScript, Tailwind CSS 4, Zustand.
 - **Backend / signaling** — Node.js, Express 5, `ws`, Mongoose, bcrypt, JWT, Zod.
-- **Transcription** — Python, FastAPI, faster-whisper (`small` by default), WebSocket streaming.
-- **AI** — local Ollama (`llama3.1:8b` by default), structured JSON validated with Zod.
+- **Transcription** — Python, FastAPI, faster-whisper (`large-v3-turbo` on GPU, `small` on CPU),
+  WebSocket streaming.
+- **AI** — local Ollama (`qwen2.5:3b` by default), structured JSON validated with Zod.
 - **Storage** — MongoDB for users, meetings, participants, chat, transcript segments, summaries,
   and recording metadata. No media blobs are stored in MongoDB.
 
@@ -59,10 +67,12 @@ recording/paused indicators. Heartbeats and reconnect backoff keep the session r
 
 **Live transcription.** Microphone audio is resampled by `/pcm-worklet.js` to 16 kHz mono PCM16 in
 roughly 200 ms frames and sent over the signaling WebSocket. The backend opens an authenticated
-WebSocket to the Python service, which transcribes overlapping 6-second windows with a 4-second
+WebSocket to the Python service, which transcribes overlapping 4-second windows with a 1.5-second
 stride using word timestamps. Overlapping words are deduplicated; provisional hypotheses and final
-segments are sent back with server-derived speaker identity. Typical end-to-end latency is a few
-seconds.
+segments are sent back with server-derived speaker identity. The language is detected once per
+stream and then pinned, which avoids re-running language identification on every window. On a CUDA
+GPU the multilingual `large-v3-turbo` model keeps typical end-to-end latency around two seconds; a
+machine without CUDA automatically falls back to the smaller CPU model.
 
 **Summaries.** Transcript segments are timestamped and chunked for a map-reduce pass. The model
 returns structured JSON, which is validated with Zod and gets one repair retry. Incremental drafts
@@ -126,16 +136,19 @@ sudo systemctl start mongod
 Install Ollama from <https://ollama.com>, then:
 
 ```bash
-ollama pull llama3.1:8b
+ollama pull qwen2.5:3b
 ollama serve
 ```
 
 On Windows, if `ollama` is not on `PATH`, use the full executable path, for example:
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" pull llama3.1:8b
+& "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" pull qwen2.5:3b
 & "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" serve
 ```
+
+`qwen2.5:3b` is the default because it fits in 6 GB of VRAM alongside the Whisper GPU model. Any
+Ollama model that returns valid JSON works; set `OLLAMA_MODEL` in `.env` and rerun `npm run setup`.
 
 ### 5. Install the Python transcription service
 
@@ -143,14 +156,21 @@ On Windows, if `ollama` is not on `PATH`, use the full executable path, for exam
 cd transcription
 py -3.11 -m venv .venv                 # Windows
 # python3.11 -m venv .venv             # macOS/Linux
-.venv\Scripts\pip install -r requirements.txt   # Windows
-# .venv/bin/pip install -r requirements.txt     # macOS/Linux
+.venv\Scripts\pip install -r requirements.txt           # Windows
+.venv\Scripts\pip install -r requirements-gpu.txt       # NVIDIA GPU only
+# .venv/bin/pip install -r requirements.txt             # macOS/Linux
+# .venv/bin/pip install -r requirements-gpu.txt         # NVIDIA GPU only
 cd ..
 ```
 
-The first startup downloads the faster-whisper `small` model and can take a while. The service
-tries CUDA `int8_float16` when available and falls back to CPU `int8`; `/health` reports the active
-device.
+The first startup downloads the faster-whisper model and can take a while (`large-v3-turbo` is about
+1.6 GB). The service tries CUDA `int8_float16` when available and falls back to CPU with the smaller
+`WHISPER_CPU_MODEL`; `/health` reports the active model, device, and compute type.
+
+`requirements-gpu.txt` installs NVIDIA's cuBLAS and cuDNN wheels. They are optional but strongly
+recommended: without them CTranslate2 cannot load `cublas64_12.dll`, and live transcription falls
+back to CPU, where it lags behind real time. `npm run dev:transcription` adds the venv's CUDA
+folders to the loader path automatically.
 
 ### 6. Start the application
 
@@ -168,6 +188,37 @@ Or start the backend and frontend together with `npm run dev`, then run
 Open <http://localhost:3000>. Check the full stack at
 <http://127.0.0.1:5000/api/health> — it probes MongoDB, faster-whisper, and Ollama for real.
 
+### 7. Share one URL with a second laptop
+
+The friend's laptop needs no project code: it joins through one public HTTPS URL. The gateway makes
+the app same-origin, so cookies, REST, WebSocket signaling, and device capture all work through the
+tunnel without CORS or mixed-content problems.
+
+```bash
+npm run gateway      # http://127.0.0.1:4000 — /api + /ws → :5000, everything else → :3000
+npm run tunnel       # prints a public https://… URL for the gateway
+```
+
+`npm run tunnel` uses `ngrok`. Install it once and authenticate:
+
+```powershell
+winget install ngrok.ngrok
+ngrok config add-authtoken <your-token>
+```
+
+Keep the backend, frontend, transcription service, gateway, and tunnel running on the host. On the
+friend's laptop, open the tunnel URL, click through ngrok's "Visit Site" interstitial if shown, then
+join as a guest with the invite link. The host should open the same tunnel URL before creating the
+meeting so invite links use the public origin.
+
+Leave `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_WS_URL` empty for this setup. The frontend then uses
+`http://localhost:5000` and `ws://localhost:5000` when opened on localhost, and same-origin `/api`
+and `/ws` (through the gateway) on any other origin.
+
+> Camera and microphone capture require a secure context, so use the HTTPS tunnel URL rather than a
+> plain `http://<lan-ip>:3000` address. WebRTC is STUN-only; on the same Wi-Fi the peers usually
+> connect directly, while restrictive networks may need a TURN relay.
+
 ### Ports
 
 | Service | Port |
@@ -176,6 +227,7 @@ Open <http://localhost:3000>. Check the full stack at
 | Backend / WebSocket signaling | 5000 |
 | Transcription service | 8000 |
 | Ollama | 11434 |
+| Gateway (remote access) | 4000 |
 | MongoDB | 27017 |
 
 ## Configuration
@@ -190,10 +242,13 @@ secrets are preserved.
 | `GUEST_TOKEN_EXPIRES_IN` | Lifetime of room-scoped guest tokens |
 | `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_WS_URL` | Backend REST and WebSocket URLs used by the browser |
 | `NEXT_PUBLIC_ICE_SERVERS` | JSON array of ICE servers; STUN only by default |
-| `OLLAMA_URL`, `OLLAMA_MODEL` | Local Ollama endpoint and model |
+| `OLLAMA_URL`, `OLLAMA_MODEL` | Local Ollama endpoint and model (`qwen2.5:3b` by default) |
 | `OLLAMA_TIMEOUT_MS`, `OLLAMA_NUM_CTX` | Model timeout and context window |
-| `WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE` | faster-whisper model/device settings (`auto` chooses CUDA then CPU) |
-| `WHISPER_CHUNK_SECONDS`, `WHISPER_STRIDE_SECONDS` | Streaming window and stride (default 6 s / 4 s) |
+| `WHISPER_MODEL`, `WHISPER_CPU_MODEL` | GPU and CPU faster-whisper models (`large-v3-turbo` / `small`) |
+| `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE` | Device selection (`auto` chooses CUDA then CPU) and precision |
+| `WHISPER_CHUNK_SECONDS`, `WHISPER_STRIDE_SECONDS` | Streaming window and stride (default 4 s / 1.5 s) |
+| `WHISPER_PROVISIONAL_INTERVAL`, `WHISPER_BEAM_SIZE` | Provisional update cadence and beam-search width |
+| `GATEWAY_PORT`, `GATEWAY_HOST` | Same-origin gateway for tunnel access |
 | `TRANSCRIPTION_URL`, `TRANSCRIPTION_TOKEN` | Backend-to-transcription connection and shared secret |
 | `SUMMARY_INCREMENT_SEGMENTS`, `SUMMARY_INCREMENT_MIN_MS` | Draft-summary cadence |
 | `MAX_PARTICIPANTS` | Mesh size cap (2–8, default 6) |
@@ -207,20 +262,33 @@ npm run typecheck          # backend + frontend TypeScript
 npm run build              # backend compile + frontend production build
 node scripts/verify-local.mjs
 npx playwright test -c e2e/playwright.config.mjs
+E2E_BASE_URL=https://<tunnel-host> npx playwright test -c e2e/playwright.config.mjs e2e/remote-smoke.spec.mjs
 ```
 
 `verify-local.mjs` registers a real account, creates a meeting, joins a host and guest over the
 signaling WebSocket, checks presence/media/recording signaling and chat, streams real recorded
 speech through the transcription service, verifies live and provisional transcript segments, stores
 recording metadata without media, ends the meeting, and waits for the automatic final Ollama
-summary. It fails if any service is unhealthy or any step is simulated.
+summary. It fails if any service is unhealthy or any step is simulated. Set `AURALIS_BACKEND_URL` to
+run it through the gateway or tunnel.
 
 The Playwright test drives three real Chrome pages with fake media devices and a real speech audio
 fixture. It verifies account and guest joining, consent, chat, the host crown, three-participant
 WebRTC video, a receive-only participant enabling media, screen sharing with the camera off,
 recording indicators across participants, pause/resume, a non-empty locally saved WebM, live
 transcription, meeting end, final summary, detail tabs, and meeting history. It requires Chrome and
-the full local stack.
+the full local stack. `remote-smoke.spec.mjs` covers the public tunnel: secure-context capture, two
+peers, chat, live transcription, and mid-call camera/microphone switching.
+
+### Verified on 2026-11-18
+
+- `node scripts/verify-local.mjs` through the gateway — all checks passed. `large-v3-turbo` on CUDA
+  transcribed 9.5 s of speech accurately, and `qwen2.5:3b` produced the final summary.
+- `npx playwright test -c e2e/playwright.config.mjs e2e/meeting.spec.mjs` — 1 passed (2.2 min).
+- `E2E_BASE_URL=https://<tunnel> npx playwright test -c e2e/playwright.config.mjs
+  e2e/remote-smoke.spec.mjs` — 1 passed (13.5 s): second browser over the public HTTPS tunnel,
+  live transcription, chat, and mid-call camera/microphone switching.
+- `npm run typecheck` — passed for backend and frontend.
 
 ### Verified on 2026-10-30
 
@@ -253,12 +321,21 @@ the full local stack.
 service are running and that their ports match `.env`. The transcription model can take 30–90
 seconds to load on CPU before it reports ready.
 
-**`cublas64_12.dll` or CUDA errors.** faster-whisper attempted CUDA and fell back to CPU `int8`.
-This is expected on machines without the CUDA runtime. To force CPU explicitly, set
-`WHISPER_DEVICE=cpu` in `.env` and rerun `npm run setup`.
+**`cublas64_12.dll` or CUDA errors.** faster-whisper tried CUDA and fell back to CPU. Install the
+GPU runtime inside the venv with `pip install -r transcription/requirements-gpu.txt` (the launcher
+adds the wheel folders to the loader path), then restart `npm run dev:transcription`. This is
+expected on machines without an NVIDIA GPU; set `WHISPER_DEVICE=cpu` to skip CUDA detection.
 
-**Ollama returns “model not found”.** Pull the configured model: `ollama pull llama3.1:8b`, or set
+**Live captions lag or mishear words.** Confirm `/health` reports `large-v3-turbo`, `cuda`, and
+`int8_float16`. A CPU fallback is several times slower than real time. On a 6 GB GPU, keep Ollama on
+a 3B model (`qwen2.5:3b`) so Whisper keeps the VRAM it needs, and close other GPU applications.
+
+**Ollama returns “model not found”.** Pull the configured model: `ollama pull qwen2.5:3b`, or set
 `OLLAMA_MODEL` to a model you already have.
+
+**Ollama fails with a CUDA error or stack-buffer overrun.** The GPU may be out of VRAM because
+Whisper and the summary model are competing. Stop the larger model (`ollama stop <model>`), use
+`qwen2.5:3b`, or set `OLLAMA_MODEL` to a smaller model and rerun `npm run setup`.
 
 **Summaries time out.** A large model on CPU can take minutes. Increase `OLLAMA_TIMEOUT_MS`, use a
 smaller model, or close other memory-heavy applications. The UI shows the error and offers a retry;
@@ -300,9 +377,12 @@ the service launch commands.
 - **Single-node signaling.** Presence and signaling rooms are in memory. A backend restart drops
   active calls; clients reconnect, but a production deployment should use sticky sessions or a
   shared presence store.
-- **Development servers use HTTP.** Camera/microphone work on localhost; remote access requires
-  HTTPS. The provided configuration is intended for local and trusted-LAN use, not public
-  multi-tenant hosting.
+- **Remote access depends on the tunnel.** The gateway + ngrok path works without installing code on
+  the guest's machine, but the tunnel URL changes on ngrok's free tier and WebRTC still has no TURN
+  relay. Camera/microphone require HTTPS, so plain LAN `http://` addresses are view/chat only.
+- **GPU sharing.** Whisper and Ollama share one GPU. On 6 GB cards keep the summary model small
+  (`qwen2.5:3b`) and stop unused Ollama models, or transcription will either compete for VRAM or
+  fall back to CPU.
 
 ## Project structure
 
@@ -323,8 +403,9 @@ frontend/
   public/            AudioWorklet for 16 kHz PCM capture
 transcription/
   app/               FastAPI service, faster-whisper model manager, streaming sessions
-e2e/                 Playwright three-participant browser test and speech fixtures
-scripts/             environment setup, transcription launcher, full-stack verifier
+  requirements-gpu.txt  optional NVIDIA cuBLAS/cuDNN runtime for CUDA inference
+e2e/                 Playwright browser tests, speech fixtures, public-tunnel smoke test
+scripts/             environment setup, transcription launcher, gateway, tunnel, verifier
 ```
 
 ## Definition of Done

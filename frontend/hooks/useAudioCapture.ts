@@ -9,6 +9,28 @@ interface Options {
 }
 
 /**
+ * Registers the PCM capture worklet.
+ *
+ * Loading `/pcm-worklet.js` straight through addModule() works on localhost
+ * but fails behind some HTTPS proxies with "MIME type mismatch": the proxied
+ * response is not accepted as a module script. Fetching the source and
+ * registering it from a Blob URL behaves identically on every origin.
+ */
+async function loadWorklet(context: AudioContext) {
+  const response = await fetch("/pcm-worklet.js", { cache: "no-cache" });
+  if (!response.ok) {
+    throw new Error(`Could not load the audio worklet (HTTP ${response.status}).`);
+  }
+  const source = await response.text();
+  const url = URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
+  try {
+    await context.audioWorklet.addModule(url);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
  * Captures microphone audio at 16 kHz mono and streams raw PCM16 frames to the
  * signaling server, which forwards them to the local faster-whisper service.
  * The AudioWorklet handles resampling from the device rate.
@@ -70,7 +92,7 @@ export function useAudioCapture(options: Options) {
     try {
       const context = new AudioContextClass({ sampleRate: 16_000, latencyHint: "interactive" });
       contextRef.current = context;
-      await context.audioWorklet.addModule("/pcm-worklet.js");
+      await loadWorklet(context);
       if (context.state === "suspended") await context.resume();
 
       const source = context.createMediaStreamSource(stream);
